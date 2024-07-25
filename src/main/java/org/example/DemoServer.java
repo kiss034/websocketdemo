@@ -1,18 +1,19 @@
 package org.example;
 
+import org.eclipse.jetty.io.ByteBufferAccumulator;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
+import org.eclipse.jetty.ee10.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee10.servlet.ServletHolder;
+import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Frame;
 import org.eclipse.jetty.websocket.api.Session;
-import org.eclipse.jetty.websocket.api.annotations.OnWebSocketConnect;
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketOpen;
 import org.eclipse.jetty.websocket.api.annotations.OnWebSocketFrame;
 import org.eclipse.jetty.websocket.api.annotations.WebSocket;
-import org.eclipse.jetty.websocket.server.*;
-import org.eclipse.jetty.websocket.server.config.JettyWebSocketServletContainerInitializer;
+import org.eclipse.jetty.ee10.websocket.server.*;
+import org.eclipse.jetty.ee10.websocket.server.config.JettyWebSocketServletContainerInitializer;
 
 import javax.annotation.Nonnull;
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -118,9 +119,13 @@ public class DemoServer {
 
     @WebSocket
     public static class ServerSocket {
+
         private Session session;
 
-        @OnWebSocketConnect
+        @Nonnull
+        private ByteBufferAccumulator accumulator = new ByteBufferAccumulator();
+
+        @OnWebSocketOpen
         public void onWebSocketConnect(Session session) {
             this.session = session;
 
@@ -129,16 +134,27 @@ public class DemoServer {
         }
 
         @OnWebSocketFrame
-        public void onWebSocketFrame(@Nonnull Session session, @Nonnull Frame frame) {
+        public void onWebSocketFrame(@Nonnull Session session, @Nonnull Frame frame, @Nonnull Callback callback) {
             Frame.Type webSocketFrameType = frame.getType();
-            if ( frame.hasPayload() && webSocketFrameType == Frame.Type.BINARY ) {
-                try {
-                    ByteBuffer buffer = frame.getPayload();
-                    if ( DemoClient.check("Server receiving ", buffer) )
-                        session.getRemote().sendBytes(buffer);
-                }
-                catch (IOException e) {
-                    throw new RuntimeException(e);
+            if (frame.hasPayload()) {
+                switch (webSocketFrameType) {
+                    case BINARY:
+                        /* falls through */
+                    case CONTINUATION:
+                        ByteBuffer buffer = frame.getPayload();
+                        accumulator.copyBuffer(buffer);
+                        if ( frame.isFin() ) {
+                            // take complete ByteBuffer,
+                            ByteBuffer message = accumulator.takeByteBuffer();
+                            try {
+                                if ( DemoClient.check("Server receiving ", message) )
+                                    session.sendBinary(message, Callback.NOOP);
+                            }
+                            finally {
+                                accumulator.close();
+                            }
+                        }
+                        break;
                 }
             }
         }

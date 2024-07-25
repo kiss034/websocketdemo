@@ -1,19 +1,21 @@
 package org.example;
 
+import org.eclipse.jetty.io.ByteBufferAccumulator;
 import org.eclipse.jetty.util.component.LifeCycle;
+import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Frame;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.UpgradeResponse;
-import org.eclipse.jetty.websocket.api.annotations.OnWebSocketConnect;
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketOpen;
 import org.eclipse.jetty.websocket.api.annotations.OnWebSocketFrame;
 import org.eclipse.jetty.websocket.api.annotations.WebSocket;
 import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 
 import javax.annotation.Nonnull;
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 
 public class DemoClient implements Runnable {
@@ -22,12 +24,28 @@ public class DemoClient implements Runnable {
     public static final int MIN_MESSAGE_LENGTH = 4;
     public static final int MAX_MESSAGE_LENGTH = 1024 * 4;
 
+    @Nonnull
+    private final CountDownLatch latch;
+
+    public DemoClient(@Nonnull CountDownLatch latch) {
+        this.latch = latch;
+    }
+
     /**
      * Connects to the server and sends {@link #MESSAGE_COUNT} random generated random length messages.
      * Also checks whether the server answers with the same messages.
      */
     public static void test() {
-        new Thread(new DemoClient()).run();
+        CountDownLatch latch = new CountDownLatch(1);
+        System.out.println("Starting demo client");
+        new Thread(new DemoClient(latch)).start();
+        try {
+            latch.await();
+        }
+        catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        System.out.println("Demo client finished");
     }
 
     @Override
@@ -51,6 +69,9 @@ public class DemoClient implements Runnable {
         }
         catch ( Exception e ) {
             throw new RuntimeException(e);
+        }
+        finally {
+            latch.countDown();
         }
     }
 
@@ -92,8 +113,15 @@ public class DemoClient implements Runnable {
             System.out.println("\n");
             result = false;
         }
+        for ( int i = 4; i < capacity; i++ ) {
+            byte expected = ((byte) (i % 256));
+            byte found = buffer.get();
+            if (found != expected)
+                System.out.println("Expected " + expected + " found " + found + " at " + buffer.position());
+        }
+
         buffer.position(position);
-        //System.out.println("\n");
+        System.out.println(".");
         return result;
     }
 
@@ -102,7 +130,10 @@ public class DemoClient implements Runnable {
 
         private Session session;
 
-        @OnWebSocketConnect
+        @Nonnull
+        private ByteBufferAccumulator accumulator = new ByteBufferAccumulator();
+
+        @OnWebSocketOpen
         public void onWebSocketConnect(Session session) {
             this.session = session;
 
@@ -111,20 +142,38 @@ public class DemoClient implements Runnable {
         }
 
         @OnWebSocketFrame
-        public void onWebSocketFrame(@Nonnull Session session, @Nonnull Frame frame) {
+        public void onWebSocketFrame(@Nonnull Session session, @Nonnull Frame frame, @Nonnull Callback callback) {
             Frame.Type webSocketFrameType = frame.getType();
-            if ( frame.hasPayload() && webSocketFrameType == Frame.Type.BINARY ) {
-                ByteBuffer buffer = frame.getPayload();
-                check("Client receiving ", buffer);
+            if (frame.hasPayload()) {
+                switch (webSocketFrameType) {
+                    case BINARY:
+                        /* falls through */
+                    case CONTINUATION:
+                        ByteBuffer buffer = frame.getPayload();
+                        accumulator.copyBuffer(buffer);
+                        if ( frame.isFin() ) {
+                            // take complete ByteBuffer,
+                            ByteBuffer message = accumulator.takeByteBuffer();
+                            try {
+                                check("Client receiving ", message);
+                            }
+                            finally {
+                                accumulator.close();
+                            }
+                        }
+                        break;
+                }
             }
         }
+
+
 
         public void send(@Nonnull ByteBuffer payload) {
             try {
                 //System.out.println("Client sending " + payload);
-                session.getRemote().sendBytes(payload);
+                session.sendBinary(payload, Callback.NOOP);
             }
-            catch (IOException e) {
+            catch (Exception e) {
                 throw new RuntimeException(e);
             }
         }
